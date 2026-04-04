@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""
-Streams species occurrence records from the GBIF API. Every 5 seconds,
-streams 300 JSON records separated by newlines to stdout. Stops streaming
-after approximately one hour.
-"""
 
 import json
+import logging
 from time import sleep
 
 import requests
-import logging
+from kafka import KafkaProducer
+
+producer = KafkaProducer(
+    bootstrap_servers="localhost:9092",
+    value_serializer=lambda v: json.dumps(v).encode("utf-8")
+)
 
 for page in range(720):
     try:
@@ -17,17 +18,28 @@ for page in range(720):
             "https://api.gbif.org/v1/occurrence/search"
             "?limit=300"
             f"&offset={page * 300}"
-            "&shuffle=40"
+            "&shuffle=40",
+            timeout=30
         )
+        print("status:", response.status_code, "page:", page, flush=True)
+        response.raise_for_status()
         data = response.json()
-        
+
+        count = 0
         for record in data.get("results", []):
-            print(json.dumps(record).lower(), flush=True)
-                
-    except TypeError as e:
+            producer.send("gbif", record)
+            count += 1
+
+        producer.flush()
+        print(f"sent {count} gbif records from page {page}", flush=True)
+
+    except (TypeError, ValueError) as e:
         logging.error("Failed to parse JSON", exc_info=e)
-        
+
     except requests.RequestException as e:
-        logging.error(f"Request failed", exc_info=e)
-    
+        logging.error("Request failed", exc_info=e)
+
     sleep(5)
+
+producer.flush()
+producer.close()

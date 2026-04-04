@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""
-Streams species occurrence records from the iDigBio API. Every 5 seconds,
-streams 300 JSON records separated by newlines to stdout. Stops streaming
-after approximately one hour.
-"""
 
 import json
+import logging
 from time import sleep
 
 import requests
-import logging
+from kafka import KafkaProducer
+
+producer = KafkaProducer(
+    bootstrap_servers="localhost:9092",
+    value_serializer=lambda v: json.dumps(v).encode("utf-8")
+)
 
 for page in range(720):
     try:
@@ -17,19 +18,26 @@ for page in range(720):
             "https://search.idigbio.org/v2/search/records"
             "?limit=300"
             f"&offset={page * 300}"
-            "&sort=uuid"
+            "&sort=uuid",
+            timeout=30
         )
+        response.raise_for_status()
         data = response.json()
-        
+
         for record in data.get("items", []):
             raw_data = record.get("data")
             if raw_data:
-                print(json.dumps(raw_data).lower(), flush=True)
-                
-    except TypeError as e:
+                producer.send("idigbio", raw_data)
+
+        producer.flush()
+
+    except (TypeError, ValueError) as e:
         logging.error("Failed to parse JSON", exc_info=e)
-        
+
     except requests.RequestException as e:
-        logging.error(f"Request failed", exc_info=e)
-    
+        logging.error("Request failed", exc_info=e)
+
     sleep(5)
+
+producer.flush()
+producer.close()

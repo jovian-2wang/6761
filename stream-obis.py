@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""
-Streams species occurrence records from the OBIS API. Every 5 seconds,
-streams 300 JSON records separated by newlines to stdout. Stops streaming
-after approximately one hour.
-"""
 
 import json
+import logging
 from time import sleep
 
 import requests
-import logging
+from kafka import KafkaProducer
+
+producer = KafkaProducer(
+    bootstrap_servers="localhost:9092",
+    value_serializer=lambda v: json.dumps(v).encode("utf-8")
+)
 
 last_id = ""
+
 for page in range(720):
     try:
         response = requests.get(
@@ -19,18 +21,25 @@ for page in range(720):
             "?size=300"
             f"&offset={page * 300}"
             "&shuffle=40"
-            + (f"&after={last_id}" if last_id else "")
+            + (f"&after={last_id}" if last_id else ""),
+            timeout=30
         )
-        data = response.json())
-        
+        response.raise_for_status()
+        data = response.json()
+
         for record in data.get("results", []):
-            print(json.dumps(record).lower(), flush=True)
-            last_id = record.get("id")
-                
-    except TypeError as e:
+            producer.send("obis", record)
+            last_id = record.get("id", last_id)
+
+        producer.flush()
+
+    except (TypeError, ValueError) as e:
         logging.error("Failed to parse JSON", exc_info=e)
-        
+
     except requests.RequestException as e:
-        logging.error(f"Request failed", exc_info=e)
-    
+        logging.error("Request failed", exc_info=e)
+
     sleep(5)
+
+producer.flush()
+producer.close()
