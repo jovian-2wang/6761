@@ -1,46 +1,35 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col, from_json, lower, coalesce, window, count, countDistinct,
-    when, lit, concat_ws, date_format
-)
+from pyspark.sql.functions import col, from_json, lower, coalesce, trim
 from pyspark.sql.types import StructType, StructField, StringType
 
-# -----------------------------
-# Spark Session
-# -----------------------------
 spark = (
     SparkSession.builder
-    .appName("BiodiversityKafkaStreaming")
+    .appName("BiodiversityKafkaRawIngest")
     .getOrCreate()
 )
 
 spark.sparkContext.setLogLevel("WARN")
 
-# -----------------------------
-# Kafka input
-# -----------------------------
+schema = StructType([
+    StructField("dwc:kingdom", StringType(), True),
+    StructField("kingdom", StringType(), True),
+    StructField("dwc:scientificName", StringType(), True),
+    StructField("scientificname", StringType(), True),
+])
+
 raw = (
     spark.readStream
     .format("kafka")
     .option(
-    "kafka.bootstrap.servers",
-    "node-0.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092,"
-    "node-1.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092,"
-    "node-2.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092"
+        "kafka.bootstrap.servers",
+        "node-0.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092,"
+        "node-1.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092,"
+        "node-2.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092"
     )
-    .option("subscribe", "gbif")
+    .option("subscribe", "idigbio,gbif,obis")
     .option("startingOffsets", "latest")
     .load()
 )
-
-
-schema = StructType([
-    StructField("dwc:kingdom", StringType(), True),
-    StructField("kingdom", StringType(), True),
-    StructField("scientificname", StringType(), True),
-])
-
-
 
 parsed = (
     raw.selectExpr(
@@ -51,105 +40,25 @@ parsed = (
     .withColumn("data", from_json(col("json_str"), schema))
 )
 
-cleaned = parsed.select(
-    col("topic").alias("source"),
-    col("timestamp"),
-    lower(
-        coalesce(
-            col("data.`dwc:kingdom`"),
-            col("data.kingdom")
-        )
-    ).alias("kingdom"),
-    lower(
-        col("data.scientificname")
-    ).alias("scientific_name")
-)
-cleaned = cleaned.withWatermark("timestamp", "2 minutes")
-
-cleaned = cleaned.filter(
-    col("kingdom").isNotNull() | col("scientific_name").isNotNull()
-)
-
-# -----------------------------
-# 1) Source counts per 2-minute window
-# -----------------------------
-source_counts = (
-    cleaned.groupBy(
-        window(col("timestamp"), "2 minutes"),
-        col("source")
+cleaned = (
+    parsed.select(
+        col("topic").alias("source"),
+        col("timestamp"),
+        trim(lower(coalesce(col("data.`dwc:kingdom`"), col("data.kingdom")))).alias("kingdom"),
+        trim(lower(coalesce(col("data.`dwc:scientificName`"), col("data.scientificname")))).alias("scientific_name")
     )
-    .agg(
-        count("*").alias("record_count")
-    )
-    .select(
-        date_format(col("window.start"), "yyyy-MM-dd HH:mm:ss").alias("window_start"),
-        date_format(col("window.end"), "yyyy-MM-dd HH:mm:ss").alias("window_end"),
-        col("source"),
-        col("record_count")
+    .filter(
+        col("kingdom").isNotNull() | col("scientific_name").isNotNull()
     )
 )
 
-# -----------------------------
-# 2) Kingdom counts per 2-minute window
-# -----------------------------
-kingdom_counts = (
-    cleaned.groupBy(
-        window(col("timestamp"), "2 minutes")
-    )
-    .agg(
-        count(when(col("kingdom") == "plantae", True)).alias("plant_count"),
-        count(when(col("kingdom") == "animalia", True)).alias("animal_count"),
-        count(when(col("kingdom") == "fungi", True)).alias("fungi_count")
-    )
-    .select(
-        date_format(col("window.start"), "yyyy-MM-dd HH:mm:ss").alias("window_start"),
-        date_format(col("window.end"), "yyyy-MM-dd HH:mm:ss").alias("window_end"),
-        col("plant_count"),
-        col("animal_count"),
-        col("fungi_count")
-    )
-)
-
-
-
-# -----------------------------
-# Output paths
-# -----------------------------
-base_out = "file:///users/Jiangwei/6761/output"
-base_ckpt = "file:///users/Jiangwei/6761/checkpoints"
-
-q1 = (
-    source_counts.writeStream
+query = (
+    cleaned.writeStream
+    .format("parquet")
     .outputMode("append")
-    .format("csv")
-    .option("path", f"{base_out}/source_counts")
-    .option("checkpointLocation", f"{base_ckpt}/source_counts")
-    .option("header", "true")
-    .trigger(processingTime="2 minutes")
+    .option("path", "/users/Jiangwei/6761/raw_stream")
+    .option("checkpointLocation", "/users/Jiangwei/6761/raw_checkpoint")
     .start()
 )
 
-q2 = (
-    kingdom_counts.writeStream
-    .outputMode("append")
-    .format("csv")
-    .option("path", f"{base_out}/kingdom_counts")
-    .option("checkpointLocation", f"{base_ckpt}/kingdom_counts")
-    .option("header", "true")
-    .trigger(processingTime="2 minutes")
-    .start()
-)
-
-#q3 = (
- #   species_counts.writeStream
-  #  .outputMode("append")
-   # .format("csv")
-    #.option("path", f"{base_out}/species_counts")
-    #.option("checkpointLocation", f"{base_ckpt}/species_counts")
-    #.option("header", "true")
-    #.trigger(processingTime="2 minutes")
-    #.start()
-#)
-
-spark.streams.awaitAnyTermination()
-
+query.awaitTermination()

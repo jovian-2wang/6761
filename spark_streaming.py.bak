@@ -1,0 +1,126 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    col, from_json, window, lower, trim,
+    count, countDistinct, when
+)
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType
+
+
+# =========================
+# 1) Spark Session
+# =========================
+spark = (
+    SparkSession.builder
+    .appName("BiodiversityKafkaStreaming")
+    .getOrCreate()
+)
+
+spark.sparkContext.setLogLevel("WARN")
+
+
+# =========================
+
+# =========================
+BROKERS = "node-0.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092"
+
+
+TOPICS = "gbif"
+
+
+# =========================
+
+# =========================
+message_schema = StructType([
+    StructField("kingdom", StringType(), True),
+    StructField("scientificname", StringType(), True),
+    StructField("eventDate", StringType(), True),
+    StructField("basisOfRecord", StringType(), True)
+])
+
+
+# =========================
+
+# =========================
+raw_df = (
+    spark.readStream
+    .format("kafka")
+    .option("kafka.bootstrap.servers", BROKERS)
+    .option("subscribe", TOPICS)
+    .option("startingOffsets", "latest")
+    .option("failOnDataLoss", "false")
+    .load()
+)
+
+
+base_df = raw_df.select(
+    col("topic").alias("source"),
+    col("timestamp"),
+    col("value").cast("string").alias("json_str")
+)
+
+
+# =========================
+# 
+# =========================
+parsed_df = base_df.withColumn(
+    "parsed",
+    from_json(col("json_str"), message_schema)
+)
+
+clean_df = parsed_df.select(
+    col("source"),
+    col("timestamp"),
+    trim(lower(col("parsed.kingdom"))).alias("kingdom"),
+    trim(col("parsed.scientificname")).alias("scientific_name")
+).filter(
+    col("scientific_name").isNotNull() & (col("scientific_name") != "")
+)
+
+labeled_df = clean_df.withColumn(
+    "kingdom_group",
+    when(col("kingdom") == "plantae", "plant")
+    .when(col("kingdom") == "animalia", "animal")
+    .when(col("kingdom") == "fungi", "fungi")
+    .otherwise("other")
+)
+# =========================
+
+# =========================
+agg_df = (
+    labeled_df
+    .withWatermark("timestamp", "5 minutes")
+    .groupBy(
+        window(col("timestamp"), "2 minutes"),
+        col("source")
+    )
+    .agg(
+        count(when(col("kingdom_group") == "plant", True)).alias("plant_records"),
+        count(when(col("kingdom_group") == "animal", True)).alias("animal_records"),
+        count(when(col("kingdom_group") == "fungi", True)).alias("fungi_records"),
+        countDistinct("scientific_name").alias("unique_species")
+    )
+    .select(
+        col("window.start").alias("window_start"),
+        col("window.end").alias("window_end"),
+        col("source"),
+        col("plant_records"),
+        col("animal_records"),
+        col("fungi_records"),
+        col("unique_species")
+    )
+)
+
+
+# ================
+# =========================
+query = (
+    agg_df.writeStream
+    .outputMode("append")
+    .format("parquet")
+    .option("path", "/users/Jiangwei/6761/output/by_source")
+    .option("checkpointLocation", "/users/Jiangwei/6761/checkpoints/by_source")
+    .trigger(processingTime="30 seconds")
+    .start()
+)
+
+query.awaitTermination()
