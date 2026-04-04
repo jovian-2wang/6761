@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.log
+
+checkpoints/
+output/
+outputs/
+results/
+tmp/
+temp/
+
+*.crc
+.DS_Store
