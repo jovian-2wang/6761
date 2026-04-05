@@ -1,33 +1,52 @@
-#!/usr/bin/env python3
-"""
-Streams species occurrence records from the GBIF API. Every 5 seconds,
-streams 300 JSON records separated by newlines to stdout. Stops streaming
-after approximately one hour.
-"""
-
 import json
+import logging
 from time import sleep
 
 import requests
-import logging
+from kafka import KafkaProducer
 
-for page in range(720):
+logging.basicConfig(level=logging.INFO)
+
+producer = KafkaProducer(
+    bootstrap_servers="localhost:9092",
+    value_serializer=lambda v: json.dumps(v).lower().encode("utf-8")
+)
+
+page = 0
+
+while True:
     try:
         response = requests.get(
             "https://api.gbif.org/v1/occurrence/search"
             "?limit=300"
             f"&offset={page * 300}"
-            "&shuffle=40"
+            "&shuffle=40",
+            timeout=30
         )
+        response.raise_for_status()
         data = response.json()
-        
-        for record in data.get("results", []):
-            print(json.dumps(record).lower(), flush=True)
-                
+
+        results = data.get("results", [])
+        if not results:
+            logging.info("No more GBIF results for this page, reset to page 0")
+            page = 0
+            sleep(5)
+            continue
+
+        for record in results:
+            producer.send("gbif", record)
+
+        producer.flush()
+        logging.info(f"Sent {len(results)} GBIF records to topic gbif (page={page})")
+        page += 1
+
     except TypeError as e:
         logging.error("Failed to parse JSON", exc_info=e)
-        
+
     except requests.RequestException as e:
-        logging.error(f"Request failed", exc_info=e)
-    
+        logging.error("Request failed", exc_info=e)
+
+    except Exception as e:
+        logging.error("Unexpected error", exc_info=e)
+
     sleep(5)
