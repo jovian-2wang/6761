@@ -17,9 +17,28 @@ STATE_FILE = "/users/Jiangwei/6761/api_state.json"
 BASE_OUTPUT = "/users/Jiangwei/6761/output"
 ALLOWED_SOURCES = ["idigbio", "gbif", "obis"]
 
+BROKERS = [
+    "node-0.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092",
+    "node-1.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092",
+    "node-2.project-jw.ufl-eel6761-sp26-pg0.wisc.cloudlab.us:9092",
+]
+
+SOURCE_SCRIPT = {
+    "idigbio": "/users/Jiangwei/6761/stream-idigbio.py",
+    "gbif": "/users/Jiangwei/6761/stream-gbif.py",
+    "obis": "/users/Jiangwei/6761/stream-obis.py",
+}
+
+
+
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return {"active_sources": []}
+        return {
+            "active_sources": [],
+            "next_broker_idx": 0,
+            "source_to_broker": {},
+            "source_to_pid": {}
+        }
     with open(STATE_FILE, "r") as f:
         return json.load(f)
 
@@ -49,11 +68,38 @@ class AddSource:
             raise web.badrequest()
 
         state = load_state()
-        if name not in state["active_sources"]:
-            state["active_sources"].append(name)
-            save_state(state)
 
-        return ""
+        if name in state["active_sources"]:
+            web.header("Content-Type", "text/plain")
+            return f"{name} already active"
+
+        broker_idx = state["next_broker_idx"]
+        broker = BROKERS[broker_idx]
+        script = SOURCE_SCRIPT[name]
+
+        env = os.environ.copy()
+        env["KAFKA_BOOTSTRAP_SERVERS"] = broker
+
+        out_log = open(f"/users/Jiangwei/6761/{name}.log", "a")
+        err_log = open(f"/users/Jiangwei/6761/{name}.err", "a")
+
+        proc = subprocess.Popen(
+            ["python3", script],
+            env=env,
+            stdout=out_log,
+            stderr=err_log
+        )
+
+        state["active_sources"].append(name)
+        state["source_to_broker"][name] = broker
+        state["source_to_pid"][name] = proc.pid
+        state["next_broker_idx"] = (broker_idx + 1) % len(BROKERS)
+
+        save_state(state)
+
+        web.header("Content-Type", "text/plain")
+        return f"started {name} on {broker} with pid {proc.pid}"
+
 
 class ListSources:
     def GET(self):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+import os
 import json
 import logging
 from time import sleep
@@ -7,8 +7,10 @@ from time import sleep
 import requests
 from kafka import KafkaProducer
 
+BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+
 producer = KafkaProducer(
-    bootstrap_servers="localhost:9092",
+    bootstrap_servers=BOOTSTRAP,
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
 )
 

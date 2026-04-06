@@ -1,15 +1,16 @@
 import json
 import logging
 from time import sleep
-
+import os
 import requests
 from kafka import KafkaProducer
 
 logging.basicConfig(level=logging.INFO)
+BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
 producer = KafkaProducer(
-    bootstrap_servers="localhost:9092",
-    value_serializer=lambda v: json.dumps(v).lower().encode("utf-8")
+    bootstrap_servers=BOOTSTRAP,
+    value_serializer=lambda v: json.dumps(v).encode("utf-8")
 )
 
 page = 0
