@@ -1,61 +1,94 @@
+import os
+import shutil
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, window, count, when, approx_count_distinct, date_format
+    col,
+    window,
+    count,
+    countDistinct,
+    when,
+    date_format,
 )
+
+
+RAW_INPUT_PATH = "/users/Jiangwei/6761/raw_stream"
+OUTPUT_DIR = "/users/Jiangwei/6761/output_final"
+
 
 spark = (
     SparkSession.builder
-    .appName("BiodiversityWindowAggregation")
+    .appName("BiodiversityWindowAggregationFinal")
+    .config("spark.sql.shuffle.partitions", "6")
     .getOrCreate()
 )
 
 spark.sparkContext.setLogLevel("WARN")
 
-df = spark.read.parquet("/users/Jiangwei/6761/raw_stream")
 
-source_counts = (
-    df.groupBy(
+if not os.path.exists(RAW_INPUT_PATH):
+    raise FileNotFoundError(f"Missing raw input path: {RAW_INPUT_PATH}")
+
+
+df = spark.read.parquet(RAW_INPUT_PATH)
+
+cleaned = (
+    df.select(
+        col("source"),
+        col("timestamp"),
+        col("kingdom"),
+        col("scientific_name"),
+    )
+    .filter(col("source").isNotNull())
+)
+
+per_source = (
+    cleaned.groupBy(
         window(col("timestamp"), "2 minutes"),
         col("source")
     )
-    .agg(count("*").alias("record_count"))
-    .select(
-        date_format(col("window.start"), "yyyy-MM-dd HH:mm:ss").alias("window_start"),
-        date_format(col("window.end"), "yyyy-MM-dd HH:mm:ss").alias("window_end"),
-        col("source"),
-        col("record_count")
-    )
-)
-
-kingdom_counts = (
-    df.groupBy(window(col("timestamp"), "2 minutes"))
     .agg(
-        count(when(col("kingdom") == "plantae", True)).alias("plant_count"),
-        count(when(col("kingdom") == "animalia", True)).alias("animal_count"),
-        count(when(col("kingdom") == "fungi", True)).alias("fungi_count")
+        count(when(col("kingdom") == "plantae", True)).alias("plant_records"),
+        count(when(col("kingdom") == "animalia", True)).alias("animal_records"),
+        count(when(col("kingdom") == "fungi", True)).alias("fungi_records"),
+        countDistinct("scientific_name").alias("unique_species"),
+        count("*").alias("total_records"),
     )
     .select(
-        date_format(col("window.start"), "yyyy-MM-dd HH:mm:ss").alias("window_start"),
-        date_format(col("window.end"), "yyyy-MM-dd HH:mm:ss").alias("window_end"),
-        col("plant_count"),
-        col("animal_count"),
-        col("fungi_count")
+        date_format(col("window.start"), "HH:mm").alias("window_start"),
+        date_format(col("window.end"), "HH:mm").alias("window_end"),
+        col("source"),
+        col("plant_records"),
+        col("animal_records"),
+        col("fungi_records"),
+        col("unique_species"),
+        col("total_records"),
     )
+    .orderBy("window_start", "source")
 )
 
-species_counts = (
-    df.filter(col("scientific_name").isNotNull())
-    .groupBy(window(col("timestamp"), "2 minutes"))
-    .agg(approx_count_distinct("scientific_name").alias("species"))
-    .select(
-        date_format(col("window.start"), "yyyy-MM-dd HH:mm:ss").alias("window_start"),
-        date_format(col("window.end"), "yyyy-MM-dd HH:mm:ss").alias("window_end"),
-        col("species")
-    )
+if os.path.exists(OUTPUT_DIR):
+    shutil.rmtree(OUTPUT_DIR)
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Save Spark output directory
+per_source.coalesce(1).write.mode("overwrite").option("header", True).csv(
+    f"{OUTPUT_DIR}/per_source_window_counts"
 )
 
-source_counts.coalesce(1).write.mode("overwrite").option("header", True).csv("/users/Jiangwei/6761/output/source_counts")
-kingdom_counts.coalesce(1).write.mode("overwrite").option("header", True).csv("/users/Jiangwei/6761/output/kingdom_counts")
-species_counts.coalesce(1).write.mode("overwrite").option("header", True).csv("/users/Jiangwei/6761/output/species_counts")
+# Also save easy-to-read local CSV files
+pdf = per_source.toPandas()
+pdf.to_csv(f"{OUTPUT_DIR}/per_source_window_counts.csv", index=False)
+
+for source in ["idigbio", "gbif", "obis"]:
+    sub = pdf[pdf["source"] == source].copy()
+    sub.to_csv(f"{OUTPUT_DIR}/{source}_table.csv", index=False)
+
+print("Saved outputs:")
+print(f"{OUTPUT_DIR}/per_source_window_counts.csv")
+print(f"{OUTPUT_DIR}/idigbio_table.csv")
+print(f"{OUTPUT_DIR}/gbif_table.csv")
+print(f"{OUTPUT_DIR}/obis_table.csv")
 
 spark.stop()
